@@ -6,12 +6,11 @@
 
 Agent skills that stop Claude Code, Codex, and Cursor from shipping ML results that look great and mean nothing.
 
-<!-- Replace with a real GIF: agent reports 1.000 AUC -> leakage-hunter catches it -> honest 0.668 -->
-<!-- ![demo](assets/demo.gif) -->
+![honest-ml demo: a 1.000 AUC model falls to an honest 0.65 once the leaks are removed](assets/demo.gif)
 
-`1.000 AUC` → **leakage found** → `0.668 AUC, 95% CI [0.54, 0.80], baseline 0.50`
+`1.000 AUC` → **leakage found** → `0.65 AUC, 95% CI [0.62, 0.67], baseline 0.50`
 
-<sub>Real output of <a href="examples/demo_train.py"><code>examples/demo_train.py</code></a> on the bundled demo dataset.</sub>
+<sub>Real output of <a href="examples/demo_train.py"><code>examples/demo_train.py</code></a> (12 seconds, deterministic; the GIF above is rendered from it by <a href="tools/make_demo_gif.py"><code>tools/make_demo_gif.py</code></a>) on the bundled demo dataset: same data, same model, four evaluation protocols.</sub>
 
 </div>
 
@@ -55,7 +54,7 @@ dataset-audit  ->  leakage-hunter  ->  reproducible-runs  ->  honest-eval
                   ml-roast: reviews any of the above and scores the result 0-10
 ```
 
-Every script is optional: skills work from the instructions alone, and the scripts make the checks fast and repeatable. They need Python 3.9+ with `pandas`, `scikit-learn` and `numpy` (`reproducible-runs`, `llm-eval` and `ml-roast` need less; see each script's header).
+Every script is optional: skills work from the instructions alone, and the scripts make the checks fast and repeatable. The whole pack adds about 620 tokens of always-on context (each skill loads its full text only when it triggers). They need Python 3.9+ with `pandas`, `scikit-learn` and `numpy` (`reproducible-runs`, `llm-eval` and `ml-roast` need less; see each script's header).
 
 ## Install
 
@@ -82,7 +81,7 @@ cp -r honest-ml/skills/* ~/.codex/skills/       # Codex
 ```bash
 pip install pandas scikit-learn
 python examples/make_leaky_data.py          # demo churn data with four planted leaks
-python examples/demo_train.py               # naive 1.000 AUC vs the honest number
+python examples/demo_train.py               # 1.000 AUC -> 0.65: the same data under four protocols
 python skills/leakage-hunter/scripts/leakage_check.py \
   --train examples/train.csv --test examples/test.csv \
   --target churned --time signup_date --group customer_id
@@ -107,7 +106,7 @@ pip install pandas scikit-learn numpy
 python -m unittest discover -s tests
 ```
 
-The tests run every script against planted-flaw fixtures and check that each `SKILL.md` is well-formed (front matter, existing script paths, working links).
+The tests run every script against planted-flaw fixtures, check that the scanner is silent on correct code, and check that each `SKILL.md` is well-formed (front matter, existing script paths, working links, documented examples that match real output). CI runs them on Ubuntu and Windows with Python 3.9, 3.10 and 3.12.
 
 ## Contributing
 

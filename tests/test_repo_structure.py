@@ -1,6 +1,7 @@
 """Every skill must be well-formed so that agents can load it and users cannot hit a dead link."""
 import json
 import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -13,6 +14,7 @@ EXPECTED = {"leakage-hunter", "honest-eval", "dataset-audit", "reproducible-runs
 
 
 def frontmatter(text):
+    text = text.replace("\r\n", "\n")  # Windows checkouts may convert line endings
     m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
     assert m, "missing YAML front matter"
     out = {}
@@ -91,6 +93,51 @@ class ScriptHygieneTests(unittest.TestCase):
             r = subprocess.run(args, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, f"{path.name}: {r.stderr[-300:]}")
             self.assertIn("usage", r.stdout.lower(), path.name)
+
+
+class DemoGifTests(unittest.TestCase):
+    def test_gif_is_valid_embedded_and_reasonably_small(self):
+        gif = ROOT / "assets" / "demo.gif"
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("assets/demo.gif", re.sub(r"<!--.*?-->", "", readme, flags=re.DOTALL))
+        data = gif.read_bytes()
+        self.assertTrue(data.startswith((b"GIF87a", b"GIF89a")))
+        self.assertLess(len(data), 2_000_000, "keep the README GIF light")
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow not installed: header check only")
+        with Image.open(gif) as im:
+            self.assertGreater(im.n_frames, 10)
+            self.assertGreaterEqual(im.width, 600)
+            self.assertEqual(im.info.get("loop"), 0)
+
+
+class DocsMatchBehaviourTests(unittest.TestCase):
+    def test_ml_roast_example_matches_the_real_scanner_output(self):
+        """The worked example in ml-roast/SKILL.md must be what the scanner really prints."""
+        import roast_scan
+        text = (SKILLS / "ml-roast" / "SKILL.md").read_text(encoding="utf-8")
+        documented = set(re.findall(r"bad_example\.py:(\d+)\]?\s+\[(R\d+)\]", text))
+        actual = {(f["where"].split(":")[1], f["rule"])
+                  for f in roast_scan.scan_lines(roast_scan.load_lines(ROOT / "examples" / "bad_example.py"))}
+        self.assertEqual(documented, actual)
+
+    def test_every_scanner_rule_is_documented_in_the_skill(self):
+        import roast_scan
+        text = (SKILLS / "ml-roast" / "SKILL.md").read_text(encoding="utf-8")
+        for rule in roast_scan.FIXES:
+            self.assertIn(rule, text, f"{rule} is not described in ml-roast/SKILL.md")
+
+
+@unittest.skipUnless(shutil.which("claude"), "Claude Code CLI not installed")
+class ClaudeCliTests(unittest.TestCase):
+    def test_plugin_and_marketplace_validate(self):
+        for target in (ROOT, ROOT / ".claude-plugin" / "plugin.json"):
+            r = subprocess.run(["claude", "plugin", "validate", str(target)], capture_output=True, text=True,
+                               timeout=120)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertNotIn("warning", r.stdout.lower(), r.stdout)
 
 
 if __name__ == "__main__":
