@@ -1,32 +1,46 @@
 ---
 name: dataset-audit
-description: Use at the start of any ML or data-science task, before modeling, when given a new dataset (CSV, Parquet, database table, image folder, text corpus). Profiles the data and finds problems that silently break models - label noise, class imbalance, missingness patterns, duplicates, outliers, unit errors, and train/serve skew. Trigger on "here's the data", "load the dataset", "EDA", "explore", or the first time a dataset appears in a task.
+description: Use the first time a new dataset (CSV, Parquet, table, image folder, text corpus) appears in a machine learning task, before any modelling. Finds label noise and conflicts, class imbalance, missingness that predicts the target, duplicates, sentinel and impossible values, unit mix-ups, mixed types, future dates, drift over time, and columns that will not exist at prediction time. Includes a runnable profiler for CSV/Parquet.
 ---
 
 # Dataset Audit
 
 Most "model problems" are data problems found too late. Audit before you model.
 
+`<skill-dir>` means the folder that contains this SKILL.md. The profiler needs `pandas`, `numpy`, `scikit-learn`.
+
 ## Steps
 
-1. **Shape and meaning.** Rows, columns, dtypes, and what one row represents (a user? a transaction? a day?). If you can't say what a row is, ask.
+1. **Run the profiler** on tabular data:
+   ```bash
+   python <skill-dir>/scripts/audit.py --data data.csv --target <target> [--time <date_col>] [--id <id_col>]
+   ```
+   It prints an issue table (`column | severity | issue -> action`) covering: missing labels and class balance, repeated feature rows with conflicting labels (a label-noise proxy), missingness per column and whether missingness predicts the target, exact duplicates and repeated ids, sentinel values (-999, 9999...), negative or impossible values in quantity-like columns, extreme outliers and max/median ratios (unit mix-ups), constant and near-constant columns, id-like and high-cardinality columns, numbers stored as text, mixed types, category spellings that differ only by case/whitespace, unparseable and future dates, target drift across months, and column names that hint at post-outcome information. Add `--json` for structured output. Exit code is `0` even with findings; usage errors exit `2`.
 
-2. **Target.** Distribution, class balance, missing labels, and how the label was produced (human annotation? a rule? a future event?). Labels derived from a rule mean the model may just learn the rule.
+2. **Shape and meaning.** State what one row represents (a user? a transaction? a day?). If you cannot, ask. The script cannot know this.
 
-3. **Missingness.** Percent missing per column, and whether missingness correlates with the target (missing-not-at-random is a signal *and* a leakage risk).
+3. **Target provenance.** How was the label produced: human annotation, a rule, a future event? Labels derived from a rule mean the model may just relearn the rule.
 
-4. **Duplicates.** Exact duplicate rows and duplicate IDs. Decide whether they're real repeats or ingestion bugs.
+4. **Read the data.** For images and text, view about 20 random examples per class. Check resolution/length distributions, corrupted files, near-duplicates, and shortcuts that reveal the label (watermarks, filenames, folder names, boilerplate).
 
-5. **Ranges and units.** Min/max/percentiles for numeric columns. Look for impossible values (negative ages, future dates, 999 sentinels, mixed units like cm and m, timezone mixing).
+5. **Train/serve skew.** For every column, decide whether it exists, with the same definition and freshness, at prediction time. Mark any that will not. The script flags suspicious *names* and missingness patterns; only the data owner can confirm.
 
-6. **Cardinality.** High-cardinality categoricals (IDs, free text) and near-constant columns. IDs as features usually mean memorization.
-
-7. **Time coverage.** Date range, gaps, and whether the distribution shifts over time (plot target rate by month).
-
-8. **Train/serve skew.** Which columns will actually exist, with the same definition, at prediction time? Mark any that won't.
-
-9. **Images/text.** Sample and look at 20 random examples per class. Check resolution/length distribution, corrupted files, near-duplicates, and watermark or filename shortcuts that reveal the label.
+6. **Act.** Fix what is fixable, exclude what is not, and list anything to confirm with the data owner instead of guessing. Do any dedupe and cleaning *before* splitting, and do any fitted imputation inside the cross-validated pipeline.
 
 ## Output contract
 
-Produce a **Data audit** with: one-line description of a row, target summary, a table of issues (`column | issue | severity | action`), and a list of columns excluded and why. Flag anything that should be confirmed with the data owner instead of guessing.
+Produce a **Data audit**:
+
+```
+Data audit: <file>
+- One row = <description>          - Rows x columns: <n x m>
+- Target: <summary: balance, missing, how produced>
+- Issues:
+  column | issue | severity | action
+- Columns excluded and why: <...>
+- To confirm with the data owner: <...>
+```
+
+## Works with
+
+Hand the cleaned data and the excluded-column list to `leakage-hunter` (which checks the splits) and `reproducible-runs` (which records the data hash).
