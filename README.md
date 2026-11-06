@@ -106,7 +106,7 @@ pip install pandas scikit-learn numpy
 python -m unittest discover -s tests
 ```
 
-The tests run every script against planted-flaw fixtures, check that the scanner is silent on correct code, and check that each `SKILL.md` is well-formed (front matter, existing script paths, working links, documented examples that match real output). CI runs them on Ubuntu and Windows with Python 3.9, 3.10 and 3.12.
+The tests run every script against planted-flaw fixtures, check that the scanner is silent on correct code, and check that each `SKILL.md` is well-formed (front matter, existing script paths, working links, documented examples that match real output). CI runs them on Ubuntu 24.04 and Windows with Python 3.9, 3.10 and 3.12.
 
 ## Contributing
 
