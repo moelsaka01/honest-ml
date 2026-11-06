@@ -1,0 +1,8 @@
+{
+  "name": "honest-ml",
+  "version": "0.1.0",
+  "description": "Agent skills that stop AI coding agents from shipping leaky, unreproducible, or overclaimed ML results.",
+  "author": { "name": "Mohamed Elsaka" },
+  "license": "MIT",
+  "keywords": ["machine-learning", "data-leakage", "evaluation", "llm-eval", "skills"]
+}

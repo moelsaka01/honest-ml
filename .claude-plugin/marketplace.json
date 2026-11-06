@@ -1,0 +1,11 @@
+{
+  "name": "honest-ml",
+  "owner": { "name": "Mohamed Elsaka" },
+  "plugins": [
+    {
+      "name": "honest-ml",
+      "source": "./",
+      "description": "Agent skills that stop AI coding agents from shipping leaky, unreproducible, or overclaimed ML results."
+    }
+  ]
+}
