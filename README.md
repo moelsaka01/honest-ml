@@ -10,7 +10,7 @@ Agent skills that stop Claude Code, Codex, and Cursor from shipping ML results t
 
 `1.000 AUC` → **leakage found** → `0.65 AUC, 95% CI [0.62, 0.67], baseline 0.50`
 
-<sub>Real output of <a href="examples/demo_train.py"><code>examples/demo_train.py</code></a> (12 seconds, deterministic; the GIF above is rendered from it by <a href="tools/make_demo_gif.py"><code>tools/make_demo_gif.py</code></a>) on the bundled demo dataset: same data, same model, four evaluation protocols.</sub>
+<sub>Real output of <a href="examples/demo_train.py"><code>examples/demo_train.py</code></a> (12 seconds; repeatable on a given install, and the honest AUC moves by about 0.02 between library versions; the GIF above is rendered from it by <a href="tools/make_demo_gif.py"><code>tools/make_demo_gif.py</code></a>) on the bundled demo dataset: same data, same model, four evaluation protocols.</sub>
 
 </div>
 

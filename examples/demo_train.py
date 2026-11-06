@@ -5,7 +5,8 @@
 
 Shows how a "1.000 AUC" model falls to its honest value as each leak is removed, runs the real
 leakage-hunter checker on the naive split, and ends with an honest model comparison.
-Needs only pandas, numpy and scikit-learn. Deterministic (seed 0), about 10 seconds.
+Needs only pandas, numpy and scikit-learn. Seeded (seed 0) and repeatable on one install, about 10 seconds;
+the honest AUC moves by roughly 0.02 between scikit-learn versions and platforms.
 """
 import subprocess
 import sys
