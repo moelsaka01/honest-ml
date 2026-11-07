@@ -113,6 +113,44 @@ class DemoGifTests(unittest.TestCase):
             self.assertEqual(im.info.get("loop"), 0)
 
 
+class AgentRecordingTests(unittest.TestCase):
+    """The README's real-agent recording must be present, referenced, and free of personal data."""
+
+    def test_recording_is_embedded_and_valid(self):
+        readme = re.sub(r"<!--.*?-->", "", (ROOT / "README.md").read_text(encoding="utf-8"), flags=re.DOTALL)
+        self.assertIn("assets/demo_agent.gif", readme)
+        gif = ROOT / "assets" / "demo_agent.gif"
+        data = gif.read_bytes()
+        self.assertTrue(data.startswith((b"GIF87a", b"GIF89a")))
+        self.assertLess(len(data), 4_000_000, "keep the hero GIF light enough to load quickly")
+
+    def test_transcripts_exist_for_both_runs_and_match_the_readme(self):
+        runs = ROOT / "assets" / "runs"
+        for mode in ("baseline", "pack"):
+            self.assertTrue((runs / f"{mode}.jsonl").exists(), mode)
+            meta = json.loads((runs / f"{mode}.meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["mode"], mode)
+            self.assertIn("churn", meta["prompt"])
+        base = json.loads((runs / "baseline.meta.json").read_text(encoding="utf-8"))
+        pack = json.loads((runs / "pack.meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(base["skills_invoked"], [], "the baseline must run with no skills")
+        self.assertTrue({"honest-ml:leakage-hunter", "honest-ml:honest-eval"} <= set(pack["skills_invoked"]))
+        self.assertEqual(base["prompt"], pack["prompt"], "both runs must get the identical prompt")
+        events = [json.loads(l) for l in (runs / "pack.jsonl").read_text(encoding="utf-8").splitlines()]
+        final = [e for e in events if e["type"] == "final"][-1]["text"]
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for number in re.findall(r"95% CI \[(0\.\d{2}), (0\.\d{2})\]\*\*, customers resampled", readme)[0]:
+            self.assertIn(number, final, f"README quotes {number} but the recorded run did not report it")
+
+    def test_published_transcripts_contain_no_personal_or_machine_data(self):
+        for path in (ROOT / "assets" / "runs").glob("*"):
+            text = path.read_text(encoding="utf-8")
+            users = set(re.findall(r"Users[\/]+([^\/\s\"'`]+)", text))
+            self.assertLessEqual(users, {"user"}, f"{path.name} exposes a username: {users}")
+            for needle in ("session_id", "mcp_servers", "messaging_socket", "claude.ai", "@gmail"):
+                self.assertNotIn(needle, text, f"{path.name} contains {needle}")
+
+
 class DocsMatchBehaviourTests(unittest.TestCase):
     def test_ml_roast_example_matches_the_real_scanner_output(self):
         """The worked example in ml-roast/SKILL.md must be what the scanner really prints."""

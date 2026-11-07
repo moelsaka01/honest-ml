@@ -1,5 +1,5 @@
 examples/*.csv
 __pycache__/
-runs/
+/runs/
 .pytest_cache/
 *.pyc

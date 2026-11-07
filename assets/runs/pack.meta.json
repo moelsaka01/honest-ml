@@ -1,0 +1,22 @@
+{
+  "mode": "pack",
+  "prompt": "I have customer churn data in train.csv and test.csv in this folder. Train a model to predict the \"churned\" column and tell me the test AUC.",
+  "model": "claude-opus-5-5",
+  "claude_code_version": "2.1.300",
+  "honest_ml_version": "0.2.0",
+  "skills_available": [
+    "honest-ml:dataset-audit",
+    "honest-ml:honest-eval",
+    "honest-ml:leakage-hunter",
+    "honest-ml:llm-eval",
+    "honest-ml:ml-roast",
+    "honest-ml:reproducible-runs"
+  ],
+  "turns": 13,
+  "wall_clock_seconds": 103.0,
+  "skills_invoked": [
+    "honest-ml:dataset-audit",
+    "honest-ml:leakage-hunter",
+    "honest-ml:honest-eval"
+  ]
+}

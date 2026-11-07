@@ -6,13 +6,32 @@
 
 Agent skills that stop Claude Code, Codex, and Cursor from shipping ML results that look great and mean nothing.
 
-![honest-ml demo: a 1.000 AUC model falls to an honest 0.65 once the leaks are removed](assets/demo.gif)
+![A real Claude Code session on the same churn data: first without honest-ml, then with it](assets/demo_agent.gif)
 
-`1.000 AUC` → **leakage found** → `0.65 AUC, 95% CI [0.62, 0.67], baseline 0.50`
-
-<sub>Real output of <a href="examples/demo_train.py"><code>examples/demo_train.py</code></a> (12 seconds; repeatable on a given install, and the honest AUC moves by about 0.02 between library versions; the GIF above is rendered from it by <a href="tools/make_demo_gif.py"><code>tools/make_demo_gif.py</code></a>) on the bundled demo dataset: same data, same model, four evaluation protocols.</sub>
+<sub>A real, unscripted screen recording: Claude Code (Opus 5.5) gets the same prompt twice, first with no skills, then with honest-ml. Sped up 5x. Raw transcripts: <a href="assets/runs/">assets/runs/</a>.</sub>
 
 </div>
+
+## What changes
+
+Same prompt, same model, same data (`train.csv` and `test.csv` with four planted leaks), taken from the recording above:
+
+| | Without honest-ml | With honest-ml |
+|---|---|---|
+| Spotted that `cancellation_reason` gives the label away | yes | yes |
+| Dropped the id column | yes | yes |
+| Picked the model on train data only | yes, plain 5-fold CV | yes, customer-grouped CV over 3 seeds |
+| Reported result | **0.685** AUC, a single number | **0.68** AUC, **95% CI [0.63, 0.72]**, customers resampled |
+| Baseline row (constant score) and PR-AUC | no | yes (PR-AUC 0.33 vs a 0.19 churn rate) |
+| Measured what the leak would have scored | yes: 1.0 | yes: 1.000 with it, 0.679 without |
+| 60 test rows duplicated in train | not mentioned | found, removed, effect measured |
+| "Random split is optimistic" caveat | not mentioned | flagged: AUC 0.53 on test customers unseen in train (n=87, noisy) |
+| Questions for the data owner | no | yes |
+| Time taken | 55 s | 103 s |
+
+**Honest note.** A strong agent already catches the *obvious* leak on its own. Across the three pairs I recorded, the run without the pack always caught `cancellation_reason` and always reported a single number with no interval. The run with the pack always reported an interval and checked more. This is three pairs on one dataset, not a benchmark. Run it yourself: the prompt is in [`assets/runs/baseline.meta.json`](assets/runs/baseline.meta.json).
+
+`1.000 AUC` → **leakage found** → `0.65 AUC, 95% CI [0.62, 0.67], baseline 0.50` is what [`examples/demo_train.py`](examples/demo_train.py) prints without any agent (12 seconds, same data, four evaluation protocols).
 
 ---
 
@@ -90,6 +109,10 @@ python skills/dataset-audit/scripts/audit.py --data examples/train.csv \
 python skills/ml-roast/scripts/roast_scan.py examples/bad_example.py
 ```
 
+![The same dataset under four evaluation protocols: 1.000 AUC falls to an honest 0.65](assets/demo.gif)
+
+<sub>Rendered from the real output of the demo by <a href="tools/make_demo_gif.py"><code>tools/make_demo_gif.py</code></a>. The honest AUC moves by about 0.02 between library versions.</sub>
+
 The demo dataset has four planted leaks (7% of test rows duplicated in train, `cancellation_reason` that gives away the label, a shuffled split on time-ordered data, and 583 customers in both sets). The checker finds all four. Then ask your agent to *"train a churn model on examples/"* with and without honest-ml installed and compare what it reports.
 
 ## Philosophy
@@ -107,6 +130,10 @@ python -m unittest discover -s tests
 ```
 
 The tests run every script against planted-flaw fixtures, check that the scanner is silent on correct code, and check that each `SKILL.md` is well-formed (front matter, existing script paths, working links, documented examples that match real output). CI runs them on Ubuntu 24.04, Windows and macOS with Python 3.9, 3.10 and 3.12.
+
+### How the recording was made
+
+`tools/record_agent.ps1` (Windows, needs ffmpeg and a logged-in `claude` CLI) opens a terminal window, starts the real agent with the identical prompt, with `--disable-slash-commands` for the baseline and `--plugin-dir .` for honest-ml, and records only that window with ffmpeg. `tools/agent_demo.py` prints the agent's live stream; it masks your home folder and username on screen, and `tools/sanitize_transcript.py` strips machine details from the saved transcripts. Nothing is scripted or edited, and the agent's behaviour is unchanged.
 
 ## Contributing
 
