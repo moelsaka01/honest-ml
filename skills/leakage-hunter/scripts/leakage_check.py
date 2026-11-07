@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
 """leakage_check.py - fast sanity checks for ML data leakage.
 
+Checks (tabular data, CSV or Parquet):
+  1. Duplicate feature rows shared by train and test (normalised: case, whitespace, float noise)
+  2. Single-feature predictive power on the test set (target-leak suspects)
+  3. Identifier-like columns used as features
+  4. Time order: train rows dated after the earliest test row   (--time)
+  5. Group overlap: the same user/customer/patient in both sets (--group)
+
 Usage:
   python leakage_check.py --train train.csv --test test.csv --target y
   python leakage_check.py --data all.csv --target y --test-size 0.2
-  Optional: --time <col> --group <col> --top 10
+  Optional: --time <col> --group <col> --top 10 --json
+
+Exit codes: 0 = no hard leak found, 1 = suspected leakage, 2 = bad usage / unreadable input.
+
+NOT covered (needs a code review, see SKILL.md): preprocessing fitted before the split,
+tuning on the test set, and whether a feature exists at prediction time.
 
 Requires: pandas, scikit-learn, numpy
 """
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import sys
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -19,121 +34,306 @@ from sklearn.metrics import r2_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
-AUC_FLAG = 0.90
-R2_FLAG = 0.80
+AUC_FLAG, AUC_WARN = 0.90, 0.80
+R2_FLAG, R2_WARN = 0.80, 0.60
+TIME_LEAK_PCT = 0.01  # >1% of train rows after the earliest test row = leak, below = warn
+MISSING = "__missing__"
+ID_NAME = re.compile(r"(^|_)(id|uuid|guid|key|index)$", re.IGNORECASE)
+LEAKY_NAME = re.compile(
+    r"(status|outcome|result|refund|closed|resolution|cancel|churn_|days_to|final_|_after|post_)",
+    re.IGNORECASE,
+)
+
+
+# --------------------------------------------------------------------------- io
+def die(message: str):
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def read_table(path: str) -> pd.DataFrame:
+    try:
+        if str(path).lower().endswith((".parquet", ".pq")):
+            return pd.read_parquet(path)
+        return pd.read_csv(path)
+    except FileNotFoundError:
+        die(f"file not found: {path}")
+    except Exception as exc:  # noqa: BLE001
+        die(f"could not read {path}: {exc}")
 
 
 def load(args) -> tuple[pd.DataFrame, pd.DataFrame]:
     if args.data:
-        df = pd.read_csv(args.data)
-        return train_test_split(df, test_size=args.test_size, random_state=0)
-    if not (args.train and args.test):
-        sys.exit("Provide --data, or both --train and --test.")
-    return pd.read_csv(args.train), pd.read_csv(args.test)
+        df = read_table(args.data)
+        train, test = train_test_split(df, test_size=args.test_size, random_state=0)
+    else:
+        train, test = read_table(args.train), read_table(args.test)
+    return train.reset_index(drop=True), test.reset_index(drop=True)
+
+
+# --------------------------------------------------------------------- helpers
+def finding(check: str, level: str, message: str, **details) -> dict:
+    """level: ok | warn | leak | skip | info"""
+    return {"check": check, "level": level, "message": message, "details": details}
 
 
 def is_classification(y: pd.Series) -> bool:
-    return not pd.api.types.is_numeric_dtype(y) or y.nunique() <= 20
+    return (not pd.api.types.is_numeric_dtype(y)) or pd.api.types.is_bool_dtype(y) or y.nunique() <= 20
 
 
+def _normalise(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    out = {}
+    for c in cols:
+        s = df[c]
+        if pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
+            out[c] = s.astype(float).round(6).astype(str)
+        else:
+            out[c] = s.astype(object).where(s.notna(), "").astype(str).str.strip().str.lower()
+    return pd.DataFrame(out, index=df.index)
+
+
+def _categories(s: pd.Series) -> pd.Series:
+    return s.astype(object).where(s.notna(), MISSING).astype(str)
+
+
+# ---------------------------------------------------------------------- checks
 def check_duplicates(train, test, target):
     cols = [c for c in train.columns if c != target and c in test.columns]
-    a = pd.util.hash_pandas_object(train[cols].astype(str), index=False)
-    b = pd.util.hash_pandas_object(test[cols].astype(str), index=False)
+    if not cols:
+        return finding("duplicates", "skip", "No shared feature columns to compare.")
+    a = pd.util.hash_pandas_object(_normalise(train, cols), index=False)
+    b = pd.util.hash_pandas_object(_normalise(test, cols), index=False)
     overlap = int(b.isin(set(a)).sum())
     pct = 100 * overlap / max(len(test), 1)
-    flag = "LEAK" if overlap else "ok"
-    print(f"[{flag}] Duplicate feature rows in test also in train: {overlap} ({pct:.1f}%)")
-    return overlap > 0
+    level = "leak" if overlap else "ok"
+    return finding(
+        "duplicates", level,
+        f"Test rows whose features also appear in train: {overlap} ({pct:.1f}%)",
+        rows=overlap, percent=round(pct, 2),
+    )
+
+
+def _score_column(x_tr, x_te, y_tr, y_te, clf):
+    """Predictive power of one column alone, fitted on train, scored on test."""
+    if pd.api.types.is_numeric_dtype(x_tr) or pd.api.types.is_bool_dtype(x_tr):
+        a = x_tr.astype(float).replace([np.inf, -np.inf], np.nan).fillna(-1e9).to_frame()
+        b = x_te.astype(float).replace([np.inf, -np.inf], np.nan).fillna(-1e9).to_frame()
+        leaf = max(5, int(0.01 * len(a)))
+        model = (DecisionTreeClassifier if clf else DecisionTreeRegressor)(
+            max_depth=4, min_samples_leaf=leaf, random_state=0)
+        model.fit(a, y_tr)
+        if clf:
+            pred = model.predict_proba(b)[:, list(model.classes_).index(1)]
+        else:
+            pred = model.predict(b)
+    else:  # categorical / text: smoothed target encoding fitted on train
+        k_tr, k_te = _categories(x_tr), _categories(x_te)
+        prior = float(y_tr.mean())
+        stats = y_tr.groupby(k_tr).agg(["mean", "count"])
+        enc = (stats["count"] * stats["mean"] + 10 * prior) / (stats["count"] + 10)
+        pred = k_te.map(enc).fillna(prior).astype(float).to_numpy()
+    if clf:
+        auc = roc_auc_score(y_te, pred)
+        return max(auc, 1 - auc)
+    return r2_score(y_te, pred)
 
 
 def single_feature_scores(train, test, target, top):
     y_tr, y_te = train[target], test[target]
     clf = is_classification(y_tr)
     if clf:
-        classes = y_tr.astype(str).unique()
-        if len(classes) != 2:
-            print("[info] Multiclass target: single-feature check uses one-vs-rest on the most common class.")
-        pos = y_tr.astype(str).value_counts().index[0]
-        y_tr = (y_tr.astype(str) == pos).astype(int)
-        y_te = (y_te.astype(str) == pos).astype(int)
+        s_tr, s_te = y_tr.astype(str), y_te.astype(str)
+        pos = s_tr.value_counts().index[0]
+        y_tr, y_te = (s_tr == pos).astype(int), (s_te == pos).astype(int)
+        if y_tr.nunique() < 2:
+            return [finding("single_feature", "skip", "Train target has a single class.")]
         if y_te.nunique() < 2:
-            print("[skip] Test target has one class; cannot compute AUC.")
-            return False
-    results = []
+            return [finding("single_feature", "skip", "Test target has a single class; AUC undefined.")]
+        metric, flag, warn = "AUC", AUC_FLAG, AUC_WARN
+        note = f"one-vs-rest on class '{pos}'" if s_tr.nunique() > 2 else f"positive class '{pos}'"
+    else:
+        y_tr, y_te = y_tr.astype(float), y_te.astype(float)
+        if y_tr.nunique() < 2:
+            return [finding("single_feature", "skip", "Train target is constant.")]
+        metric, flag, warn = "R2", R2_FLAG, R2_WARN
+        note = "regression"
+
+    results, skipped = [], []
     for col in train.columns:
         if col == target or col not in test.columns:
             continue
-        x_tr, x_te = train[[col]].copy(), test[[col]].copy()
-        if not pd.api.types.is_numeric_dtype(x_tr[col]):
-            codes = {v: i for i, v in enumerate(x_tr[col].astype(str).unique())}
-            x_tr[col] = x_tr[col].astype(str).map(codes).astype(float)
-            x_te[col] = x_te[col].astype(str).map(codes).fillna(-1).astype(float)
-        x_tr, x_te = x_tr.fillna(-999), x_te.fillna(-999)
-        model = (DecisionTreeClassifier if clf else DecisionTreeRegressor)(max_depth=4, random_state=0)
         try:
-            model.fit(x_tr, y_tr)
-            if clf:
-                score = roc_auc_score(y_te, model.predict_proba(x_te)[:, 1])
-                score = max(score, 1 - score)
-            else:
-                score = r2_score(y_te, model.predict(x_te))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                score = _score_column(train[col], test[col], y_tr, y_te, clf)
+            if score == score:  # not NaN
+                results.append((col, float(score)))
         except Exception as exc:  # noqa: BLE001
-            print(f"[skip] {col}: {exc}")
-            continue
-        results.append((col, score))
+            skipped.append((col, str(exc)[:80]))
     results.sort(key=lambda t: t[1], reverse=True)
-    limit = AUC_FLAG if clf else R2_FLAG
-    metric = "AUC" if clf else "R2"
-    print(f"\nTop single-feature {metric} (flag >= {limit}):")
-    flagged = False
-    for col, score in results[:top]:
-        mark = "LEAK?" if score >= limit else "     "
-        flagged |= score >= limit
-        print(f"  {mark} {col:<40} {score:.3f}")
-    return flagged
+
+    out = []
+    shown = {c for c, _ in results[:top]} | {c for c, s in results if s >= warn}
+    rows = [(c, s) for c, s in results if c in shown]
+    flagged = [c for c, s in results if s >= flag]
+    warned = [c for c, s in results if warn <= s < flag]
+    level = "leak" if flagged else "warn" if warned else "ok"
+    msg = (f"Single-feature {metric} on test ({note}); flag >= {flag}, warn >= {warn}. "
+           + (f"Suspects: {', '.join(flagged)}." if flagged else "No column predicts the target alone."))
+    out.append(finding("single_feature", level, msg, metric=metric,
+                       scores={c: round(s, 4) for c, s in rows}, flagged=flagged, warned=warned))
+    if skipped:
+        out.append(finding("single_feature_skipped", "info",
+                           "Columns that could not be scored: " + "; ".join(f"{c} ({e})" for c, e in skipped)))
+    return out
+
+
+def check_identifiers(train, target):
+    hits = []
+    n = len(train)
+    for col in train.columns:
+        if col == target:
+            continue
+        s = train[col]
+        name_hit = bool(ID_NAME.search(col))
+        unique_hit = (n >= 50 and s.nunique(dropna=True) / n > 0.95
+                      and not pd.api.types.is_float_dtype(s))
+        if name_hit or unique_hit:
+            hits.append(col)
+    if hits:
+        return finding("identifiers", "warn",
+                       f"Identifier-like columns (drop as features, or use only as --group): {', '.join(hits)}",
+                       columns=hits)
+    return finding("identifiers", "ok", "No identifier-like feature columns.")
+
+
+def check_names(train, target):
+    hits = [c for c in train.columns if c != target and LEAKY_NAME.search(c)]
+    if hits:
+        return finding("name_hints", "info",
+                       "Column names that often hide future information (confirm each exists at "
+                       f"prediction time): {', '.join(hits)}", columns=hits)
+    return None
+
+
+def _to_time(s: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
+        return s.astype(float)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return pd.to_datetime(s, errors="coerce")
 
 
 def check_time(train, test, col):
-    t_tr = pd.to_datetime(train[col], errors="coerce")
-    t_te = pd.to_datetime(test[col], errors="coerce")
-    later = int((t_tr > t_te.min()).sum())
-    flag = "LEAK" if later else "ok"
-    print(f"\n[{flag}] Train rows dated after the earliest test row: {later} "
-          f"(train max {t_tr.max()}, test min {t_te.min()})")
-    return later > 0
+    for name, df in (("train", train), ("test", test)):
+        if col not in df.columns:
+            return finding("time_order", "skip", f"Time column '{col}' missing from {name}.")
+    t_tr, t_te = _to_time(train[col]), _to_time(test[col])
+    n_tr, n_te = int(t_tr.notna().sum()), int(t_te.notna().sum())
+    if n_tr == 0 or n_te == 0:
+        return finding("time_order", "skip", f"Could not parse '{col}' as dates or numbers.")
+    cutoff = t_te.min()
+    later = int((t_tr > cutoff).sum())
+    pct = later / n_tr
+    level = "leak" if pct > TIME_LEAK_PCT else "warn" if later else "ok"
+    msg = (f"Train rows dated after the earliest test row: {later} ({100 * pct:.1f}% of train). "
+           f"train max={t_tr.max()}, test min={cutoff}")
+    if level == "leak":
+        msg += ". Looks like a random split on time-ordered data; split by time instead."
+    return finding("time_order", level, msg, rows=later, percent=round(100 * pct, 2))
 
 
 def check_group(train, test, col):
+    for name, df in (("train", train), ("test", test)):
+        if col not in df.columns:
+            return finding("group_overlap", "skip", f"Group column '{col}' missing from {name}.")
     shared = set(train[col].dropna()) & set(test[col].dropna())
-    flag = "LEAK" if shared else "ok"
-    print(f"\n[{flag}] Groups in both train and test ('{col}'): {len(shared)}")
-    return bool(shared)
+    rows = int(test[col].isin(shared).sum())
+    pct = 100 * rows / max(len(test), 1)
+    level = "leak" if shared else "ok"
+    return finding("group_overlap", level,
+                   f"Groups in both train and test ('{col}'): {len(shared)} "
+                   f"({rows} test rows, {pct:.1f}%)", groups=len(shared), test_rows=rows)
 
 
-def main():
+# ------------------------------------------------------------------------ main
+TAGS = {"ok": "[ok]   ", "warn": "[WARN] ", "leak": "[LEAK] ", "skip": "[skip] ", "info": "[info] "}
+
+
+def run(argv=None) -> tuple[int, list[dict]]:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--train"); p.add_argument("--test"); p.add_argument("--data")
     p.add_argument("--test-size", type=float, default=0.2)
     p.add_argument("--target", required=True)
     p.add_argument("--time"); p.add_argument("--group")
     p.add_argument("--top", type=int, default=10)
-    args = p.parse_args()
+    p.add_argument("--json", action="store_true", help="print findings as JSON")
+    args = p.parse_args(argv)
+
+    if not args.data and not (args.train and args.test):
+        p.error("provide --data, or both --train and --test.")
+    if args.data and (args.train or args.test):
+        p.error("use either --data or --train/--test, not both.")
+    if not 0 < args.test_size < 1:
+        p.error("--test-size must be between 0 and 1.")
 
     train, test = load(args)
-    if args.target not in train.columns:
-        sys.exit(f"Target '{args.target}' not in columns.")
-    print(f"Train {train.shape}, test {test.shape}, target '{args.target}'\n")
+    for name, df in (("train", train), ("test", test)):
+        if args.target not in df.columns:
+            p.error(f"target '{args.target}' not in {name} columns: {list(df.columns)[:15]}")
+        if len(df) == 0:
+            p.error(f"{name} set is empty.")
 
-    leaks = [check_duplicates(train, test, args.target)]
-    leaks.append(single_feature_scores(train, test, args.target, args.top))
+    findings: list[dict] = []
+    dropped = int(train[args.target].isna().sum() + test[args.target].isna().sum())
+    train = train.dropna(subset=[args.target]).reset_index(drop=True)
+    test = test.dropna(subset=[args.target]).reset_index(drop=True)
+    if len(train) == 0 or len(test) == 0:
+        p.error("no rows with a target value left after dropping missing targets.")
+    if dropped:
+        findings.append(finding("target_missing", "info", f"Dropped {dropped} rows with a missing target."))
+
+    findings.append(check_duplicates(train, test, args.target))
+    findings.extend(single_feature_scores(train, test, args.target, args.top))
+    findings.append(check_identifiers(train, args.target))
+    hint = check_names(train, args.target)
+    if hint:
+        findings.append(hint)
     if args.time:
-        leaks.append(check_time(train, test, args.time))
+        findings.append(check_time(train, test, args.time))
     if args.group:
-        leaks.append(check_group(train, test, args.group))
+        findings.append(check_group(train, test, args.group))
 
-    print("\nVerdict:", "SUSPECTED LEAKAGE - investigate flagged items" if any(leaks) else "no leakage detected by these checks")
-    sys.exit(1 if any(leaks) else 0)
+    leaks = [f for f in findings if f["level"] == "leak"]
+    warns = [f for f in findings if f["level"] == "warn"]
+    if leaks:
+        verdict = "SUSPECTED LEAKAGE - investigate the [LEAK] items before reporting any metric"
+    elif warns:
+        verdict = "No hard leak found, but review the [WARN] items"
+    else:
+        verdict = "No leakage detected by these checks"
+
+    if args.json:
+        print(json.dumps({"verdict": verdict, "findings": findings}, indent=2, default=str))
+    else:
+        print(f"Train {train.shape}, test {test.shape}, target '{args.target}'"
+              + (" (random split of --data; time/group/duplicate checks describe that split)" if args.data else "")
+              + "\n")
+        for f in findings:
+            print(TAGS[f["level"]] + f["message"])
+            if f["check"] == "single_feature":
+                for c, s in f["details"].get("scores", {}).items():
+                    mark = "<-- suspect" if c in f["details"]["flagged"] else ""
+                    print(f"          {c:<36} {s:.3f} {mark}".rstrip())
+        print(f"\nVerdict: {verdict}")
+        print("Not covered by this script: preprocessing fitted before the split, tuning on test, "
+              "feature availability at prediction time. Review the code for those.")
+    return (1 if leaks else 0), findings
+
+
+def main():
+    code, _ = run()
+    sys.exit(code)
 
 
 if __name__ == "__main__":

@@ -1,52 +1,67 @@
 ---
 name: leakage-hunter
-description: Use whenever you build, train, or report results for a machine learning model on tabular, time-series, text, or image data, and before claiming any metric. Detects train/test contamination, target leakage, temporal leakage, group leakage, and preprocessing fitted on the full dataset. Trigger on "train a model", "accuracy is", "AUC", "suspiciously good", "why is my model so good", or any sklearn/xgboost/lightgbm/pytorch training code.
+description: Use before reporting any metric from a machine learning model (tabular, time-series, text, or image), and whenever a score looks too good (very high AUC/accuracy/R2, train and test almost equal, one feature doing all the work). Detects duplicate rows across splits, target leakage, time-order mistakes, shared users/groups, and preprocessing fitted before the split. Includes a runnable checker for CSV/Parquet.
 ---
 
 # Leakage Hunter
 
-A model that scores 0.99 on day one is almost always leaking. Your job is to prove it isn't before anyone sees the number.
+A model that scores 0.99 on the first try is almost always leaking. Prove it is not before anyone sees the number.
 
-## When a metric looks too good, assume leakage first
+`<skill-dir>` below means the folder that contains this SKILL.md. The checker needs `pandas`, `scikit-learn`, `numpy` (`pip install pandas scikit-learn`).
 
-Stop and investigate if any of these hold:
-- Test score is within ~1% of train score on a hard problem.
-- A single feature gives most of the performance.
-- Performance is far above published baselines for the task.
-- Performance collapses when you change the random split to a time-based or group-based split.
+## Stop and investigate if any of these hold
 
-## The checklist (run all of it, in order)
+- The score is far above the baseline or published results for the task.
+- Train and test scores are nearly identical *and* very high.
+- One feature gives most of the performance.
+- The score drops sharply when you switch from a random split to a time-based or group-based split.
 
-1. **Duplicate rows across splits.** Exact and near-duplicate rows in both train and test inflate scores. Run the bundled script:
+## The checklist (run every item, in order)
+
+1. **Run the checker** whenever you have train and test files (or one file):
    ```bash
-   python <skill-dir>/scripts/leakage_check.py --train train.csv --test test.csv --target <target_col> [--time <time_col>] [--group <group_col>]
+   python <skill-dir>/scripts/leakage_check.py --train train.csv --test test.csv --target <target> [--time <date_col>] [--group <id_col>]
+   python <skill-dir>/scripts/leakage_check.py --data all.csv --target <target>      # random 80/20 split of one file
    ```
-   It reports duplicate overlap, single-feature AUC/R² (target-leak suspects), time-order violations, and group overlap.
+   It reports: duplicate feature rows shared by train and test (case, whitespace and float noise are normalised), the predictive power of each single feature on the test set, identifier-like columns, train rows dated after the earliest test row (`--time`), and groups present in both sets (`--group`). Exit code `1` means a suspected leak, `0` means none found by these checks, `2` means bad input. Add `--json` for machine-readable output.
+   `[LEAK]` lines must be resolved or explained. `[WARN]` lines need a decision. A single feature scoring AUC >= 0.9 (or R2 >= 0.8) is *suspect*, not automatically wrong: confirm whether it exists at prediction time before dropping or keeping it.
+   With `--data` the split is random, so time/group/duplicate results describe that random split. That is the point: they show what a naive split would leak.
 
-2. **Target leakage.** For every feature ask: *would this value be known at prediction time?* Red flags: columns named `*_status`, `*_outcome`, `*_result`, `days_to_*`, `closed_at`, `refund_*`, IDs that encode the label, or aggregates computed over the whole dataset. Any single feature with AUC > 0.9 (classification) or R² > 0.8 (regression) is guilty until proven innocent.
+2. **Target leakage (check by reading the columns).** For every feature ask: *would this value be known at the moment of prediction, with this definition?* Red flags: names like `*_status`, `*_outcome`, `*_result`, `days_to_*`, `closed_at`, `refund_*`, `cancellation_*`, columns filled in only after the event, IDs that encode the label, and aggregates computed over the whole dataset (including the future).
 
-3. **Preprocessing leakage.** Scalers, imputers, encoders, PCA, feature selection, SMOTE/oversampling, and target encoding must be **fit on train only**. Enforce it with a `sklearn.pipeline.Pipeline` inside cross-validation. Never call `fit_transform` on the full dataset before splitting.
+3. **Preprocessing leakage (the checker cannot see this; read the code).** Scalers, imputers, encoders, PCA, feature selection, SMOTE/oversampling, target encoding and text vectorizers must be **fitted on train only**. Wrap them with the model in a `sklearn.pipeline.Pipeline` and cross-validate the pipeline. Never `fit`/`fit_transform` on the full dataset before splitting.
 
-4. **Temporal leakage.** If rows have a timestamp and the model will predict the future, split by time (train on past, test on future). Use `TimeSeriesSplit`, never shuffled `KFold`. Rolling features must only use past windows (`shift(1)` before `rolling`).
+4. **Temporal leakage.** If rows have timestamps and the model will predict the future, split by time (train on the past, test on the future) and use `TimeSeriesSplit`, not shuffled `KFold`. Rolling/lag features must use only the past: `df[col].shift(1).rolling(w).mean()`.
 
-5. **Group leakage.** If the same patient, user, customer, device, image source, or document appears multiple times, all of its rows must land in one split. Use `GroupKFold` / `GroupShuffleSplit`.
+5. **Group leakage.** If the same user, patient, customer, device, document source or image source appears in many rows, keep all of its rows in one split: `GroupKFold` / `GroupShuffleSplit` / `StratifiedGroupKFold` with `groups=<id column>`.
 
-6. **Tuning on the test set.** Hyperparameters, thresholds, early stopping, and feature choices must be decided on a validation set or inner CV. The test set is touched **once**, at the end.
+6. **Tuning on the test set.** Hyperparameters, thresholds, early stopping and feature choices are decided on validation data or inner CV. The test set is used once, at the end. If it was looked at earlier, say so in the report.
 
-7. **Text/LLM data.** Check for benchmark contamination (test items appearing in pretraining or few-shot prompts) and near-duplicate documents across splits (normalize whitespace/case and hash).
+7. **Text, image and LLM data.** Check for near-duplicates across splits. Text: normalise (lowercase, collapse whitespace) and hash:
+   ```python
+   import hashlib, re
+   norm = lambda s: hashlib.md5(re.sub(r"\s+", " ", s.lower()).strip().encode()).hexdigest()
+   overlap = set(map(norm, train_texts)) & set(map(norm, test_texts))
+   ```
+   Images: compare perceptual hashes. For LLM benchmarks, check that test items do not appear in few-shot prompts, fine-tuning data or retrieval corpora.
 
 ## Output contract
 
-Before reporting any metric, write a short **Leakage report**:
+Before reporting any metric, write this report (see `honest-eval` for the metric table that follows it):
 
 ```
 Leakage report
 - Split strategy: <random | time | group> because <reason>
+- Checker: <ran, exit code N | not run because ...>
 - Duplicate overlap train/test: <n rows / %>
 - Top single-feature scores: <feature: score, ...> -> <cleared | removed | investigating>
-- Preprocessing fit on: <train only via Pipeline | ...>
-- Test set used: <once, at the end>
-- Verdict: <clean | leak found and fixed | unresolved risk: ...>
+- Preprocessing fitted on: <train only via Pipeline | ...>
+- Test set used: <once, at the end | also earlier for ...>
+- Verdict: <clean | leak found and fixed (metric before -> after) | unresolved risk: ...>
 ```
 
-If any item is unresolved, say so next to the metric. Never present a number you have not cleared.
+If anything is unresolved, say so next to the metric. Never present a number you have not cleared. When the verdict is "leak found and fixed", show the metric before and after; the drop is the finding.
+
+## Works with
+
+`dataset-audit` runs before this (it finds columns that will not exist at prediction time). `honest-eval` runs after it (baseline, interval, single test use). `ml-roast` re-checks these items when reviewing code.

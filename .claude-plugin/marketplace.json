@@ -1,6 +1,11 @@
 {
   "name": "honest-ml",
-  "owner": { "name": "Mohamed Elsaka" },
+  "owner": {
+    "name": "Mohamed Elsaka"
+  },
+  "metadata": {
+    "description": "Agent skills that stop AI coding agents from reporting ML results that look great and are wrong."
+  },
   "plugins": [
     {
       "name": "honest-ml",
