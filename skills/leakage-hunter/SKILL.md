@@ -27,7 +27,14 @@ A model that scores 0.99 on the first try is almost always leaking. Prove it is 
    `[LEAK]` lines must be resolved or explained. `[WARN]` lines need a decision. A single feature scoring AUC >= 0.9 (or R2 >= 0.8) is *suspect*, not automatically wrong: confirm whether it exists at prediction time before dropping or keeping it.
    With `--data` the split is random, so time/group/duplicate results describe that random split. That is the point: they show what a naive split would leak.
 
-2. **Target leakage (check by reading the columns).** For every feature ask: *would this value be known at the moment of prediction, with this definition?* Red flags: names like `*_status`, `*_outcome`, `*_result`, `days_to_*`, `closed_at`, `refund_*`, `cancellation_*`, columns filled in only after the event, IDs that encode the label, and aggregates computed over the whole dataset (including the future).
+   **Point-in-time check (opt-in).** A chronological split does not catch a feature that was *backfilled* after the decision (a balance, a score or a label-derived field written later). The script can only see that if the data records when each value was written. Pass the column holding the moment of prediction and each feature's timestamp:
+   ```bash
+   python <skill-dir>/scripts/leakage_check.py --train train.csv --test test.csv --target <target> \
+     --decision-time <scored_at> --asof <feature>:<feature_updated_at>
+   ```
+   Columns named `<feature>_asof`, `_as_of`, `_updated_at`, `_recorded_at`, `_loaded_at`, `_ingested_at`, `_observed_at` or `_snapshot_at` are paired automatically. A feature with values stamped after the decision time is a `[LEAK]` (over 1% of rows) or `[WARN]` (a few rows). **If no as-of timestamps exist, the script says it cannot tell** and you must ask the data owner for load or snapshot history; do not report availability as verified.
+
+2. **Target leakage (check by reading the columns).** For every feature ask: *would this value be known at the moment of prediction, with this definition, as it was then (not as it was corrected or backfilled later)?* Red flags: names like `*_status`, `*_outcome`, `*_result`, `days_to_*`, `closed_at`, `refund_*`, `cancellation_*`, columns filled in only after the event, IDs that encode the label, and aggregates computed over the whole dataset (including the future).
 
 3. **Preprocessing leakage (the checker cannot see this; read the code).** Scalers, imputers, encoders, PCA, feature selection, SMOTE/oversampling, target encoding and text vectorizers must be **fitted on train only**. Wrap them with the model in a `sklearn.pipeline.Pipeline` and cross-validate the pipeline. Never `fit`/`fit_transform` on the full dataset before splitting.
 
