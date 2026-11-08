@@ -30,6 +30,9 @@ Rules
   R13 SERIOUS  loop that picks the best candidate using the test set
   R14 MINOR    pd.get_dummies before the split (train/serve columns can differ)
   R15 SERIOUS  imputation / standardisation with statistics of the full data before the split
+  R16 SERIOUS  group target mean / target encoding built from the full data before the split
+  R17 MINOR    drop_duplicates() on one split after the split (train/test overlap is not removed)
+  R18 SERIOUS  a search's best_score_ (a validation score) reported as a test score
 """
 from __future__ import annotations
 
@@ -127,7 +130,22 @@ FIXES = {
            "exist at inference.",
     "R15": "Compute fill values / means / stds on the train split only (SimpleImputer / StandardScaler inside "
            "a Pipeline), then apply them to validation and test.",
+    "R16": "Split first, then compute the per-group target statistic on the train rows only (out-of-fold, or "
+           "sklearn TargetEncoder inside a Pipeline) and apply it to validation and test.",
+    "R17": "Deduplicate the full data before splitting, and keep all rows of one entity in the same split, so a "
+           "row cannot appear in both train and test.",
+    "R18": "best_score_ is the cross-validation score that picked the model. Report the score of the refit "
+           "model on the untouched test set (search.score(X_test, y_test)), once.",
 }
+
+TARGETISH = re.compile(r"^(y|target|label|labels|churn|churned|outcome|survived|default|fraud|converted|clicked)$",
+                       re.IGNORECASE)
+TARGET_VARS = re.compile(r"^(y|target|label|labels|y_all|y_full)$", re.IGNORECASE)
+AGG_NAMES = {"mean", "median", "sum", "std", "var", "max", "min", "transform", "agg", "aggregate", "apply"}
+
+
+def const_strings(node) -> list[str]:
+    return [n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
 
 
 class ParseError(Exception):
@@ -247,6 +265,50 @@ class Analyzer:
         self.tree, self.locs = tree, locs
         self.findings: list[dict] = []
         self._seen: set[tuple] = set()
+        self.target_cols = self._target_columns()
+
+    def _target_columns(self) -> set:
+        """Column names that end up as the label (y = df['churned'], target = df.pop('y'), ...)."""
+        cols: set = set()
+        for n in ast.walk(self.tree):
+            if isinstance(n, ast.Assign):
+                names = [x for t in n.targets for x in store_names(t)]
+                if any(TARGET_VARS.match(nm) for nm in names):
+                    cols.update(const_strings(n.value))
+        return cols
+
+    def is_target_col(self, col: str) -> bool:
+        return col in self.target_cols or bool(TARGETISH.match(col))
+
+    def groupby_target_agg(self, call: ast.Call) -> bool:
+        """df.groupby(k)[target].mean() / .transform(...) / .agg({target: ...}): a per-group target statistic."""
+        f = call.func
+        if not isinstance(f, ast.Attribute) or f.attr not in AGG_NAMES:
+            return False
+        v = f.value
+        if isinstance(v, ast.Subscript) and any(isinstance(c, ast.Call) and call_name(c) == "groupby"
+                                                for c in ast.walk(v.value)):
+            return any(self.is_target_col(c) for c in const_strings(v.slice))
+        if f.attr in ("agg", "aggregate") and isinstance(v, ast.Call) and call_name(v) == "groupby":
+            return any(self.is_target_col(c) for a in call.args if isinstance(a, ast.Dict)
+                       for k in a.keys if k is not None for c in const_strings(k))
+        return False
+
+    def assign_rules(self, node: ast.Assign, tainted: set, split_line):
+        before_split = split_line is not None and node.lineno < split_line
+        has_agg = any(isinstance(c, ast.Call) and self.groupby_target_agg(c) for c in ast.walk(node.value))
+        uses_enc = any(isinstance(c, ast.Name) and c.id in tainted for c in ast.walk(node.value))
+        makes_column = any(isinstance(t, (ast.Subscript, ast.Attribute)) for t in node.targets)
+        if has_agg and not makes_column:
+            tainted.update(n for t in node.targets for n in store_names(t))   # enc = df.groupby(k)[y].mean()
+        elif (has_agg or uses_enc) and makes_column and before_split:         # df['k_enc'] = ...: a feature
+            self.add("R16", "SERIOUS", node, "a per-group statistic of the target becomes a feature using the "
+                                             "data before the split (target leakage)")
+        # R18: best_score_ is a validation score
+        if any(isinstance(c, ast.Attribute) and c.attr == "best_score_" for c in ast.walk(node.value)):
+            names = [n for t in node.targets for n in store_names(t)]
+            if any(set(tokens(n)) & TEST_TOKENS for n in names):
+                self.add("R18", "SERIOUS", node, "a validation score (`best_score_`) is stored as a test score")
 
     def loc(self, node) -> str:
         i = max(0, min(getattr(node, "lineno", 1) - 1, len(self.locs) - 1))
@@ -390,7 +452,10 @@ class Analyzer:
         return False
 
     def scope_rules(self, scope, nodes, classify, ctors, sources, split_line):
+        tainted: set[str] = set()
         for node in nodes:
+            if isinstance(node, ast.Assign):
+                self.assign_rules(node, tainted, split_line)
             if isinstance(node, ast.Call):
                 self.call_rules(node, classify, ctors, split_line)
             elif isinstance(node, ast.BinOp) and split_line is not None and node.lineno < split_line:
@@ -425,6 +490,14 @@ class Analyzer:
         for k in call.keywords:                                    # R6
             if k.arg in ("eval_set", "validation_data", "evals", "eval_dataset") and classify(k.value) == "test":
                 self.add("R6", "SERIOUS", call, f"`{k.arg}` uses the test set for early stopping/validation")
+        if cn in ("print", "info", "log", "write") and any(            # R18: "test ... best_score_" in a report
+                isinstance(c, ast.Attribute) and c.attr == "best_score_" for a in call.args for c in ast.walk(a)) \
+                and any(re.search(r"\btest\b", s, re.IGNORECASE) for a in call.args for s in const_strings(a)):
+            self.add("R18", "SERIOUS", call, "a validation score (`best_score_`) is printed as a test score")
+        if cn == "drop_duplicates" and isinstance(call.func, ast.Attribute) and split_line is not None \
+                and call.lineno > split_line and classify(call.func.value) in ("train", "test", "val"):
+            self.add("R17", "MINOR", call, "drop_duplicates() on one split after the split: rows shared between "
+                                           "train and test are not removed")
         if split_line is not None and call.lineno < split_line:    # R15 / R14
             if cn == "fillna" and any(isinstance(c, ast.Call) and call_name(c) in ("mean", "median", "mode")
                                       for a in call.args for c in ast.walk(a)):
@@ -741,5 +814,15 @@ def run(argv=None) -> tuple[int, list[dict]]:
     return (1 if any(f["level"] == "FATAL" for f in findings) else 0), findings
 
 
+def _safe_console():
+    """Source files can contain non-ASCII names and text; never crash on a legacy console encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 if __name__ == "__main__":
+    _safe_console()
     sys.exit(run()[0])

@@ -35,11 +35,11 @@ If you cannot rerun it and get the same number, you do not have a result. You ha
    write_metrics(run_dir, {"roc_auc": 0.71})
    ```
    or from the shell: `python <skill-dir>/scripts/repro.py snapshot --name lgbm-baseline --seed 0 --data data/train.csv --config config.yaml`.
-   This creates `runs/<timestamp>_<name>/` containing `seed.txt`, `env.txt` (Python, OS, GPU/torch if present, full `pip freeze`), `git.txt` (commit SHA, branch, whether the tree was dirty), `data_hash.txt` (SHA-256 and line count per data file, or per directory), and a copy of the config. Two runs in the same second never overwrite each other.
+   This creates `runs/<timestamp>_<name>/` containing `seed.txt`, `env.txt` (Python, OS, GPU/torch if present, full `pip freeze`), `git.txt` (commit SHA, branch, whether the tree was dirty; if dirty, the changed files and a SHA-256 of `git diff HEAD`), `data_hash.txt` (SHA-256 and line count per data file, or per directory), and a copy of the config. Your home folder is written as `~`, so a run folder does not publish your username. Two runs in the same second never overwrite each other.
 
 4. **Pin the environment** for the project: `requirements.txt` with exact versions (`pip freeze`) or a lockfile (`uv.lock`, `poetry.lock`).
 
-5. **Commit before the run.** If `git.txt` says `"dirty": true`, the SHA does not describe the code that ran. Commit, or record the diff, and say so.
+5. **Commit before the run.** If `git.txt` says `"dirty": true`, the SHA does not describe the code that ran (`changed_files` and `diff_sha256` say what differed). Commit, or save the diff yourself (`git diff HEAD > run.diff`), and say so.
 
 6. **Report variance across seeds.** For any headline result, run at least 3 seeds:
    ```bash

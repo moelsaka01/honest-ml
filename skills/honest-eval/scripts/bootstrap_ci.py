@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -124,6 +125,33 @@ def baseline_predictions(name, y, baseline_value=None):
     return np.full(len(y), value, dtype=y.dtype), value
 
 
+def validate_inputs(metric: str, df: pd.DataFrame, y_col: str, pred_cols: list[str], has_pos_label: bool):
+    """Stop with a clear message instead of printing a table of nan for the wrong kind of column."""
+    y = df[y_col]
+    classes = y.unique()
+    numeric = lambda s: pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s)  # noqa: E731
+    if metric in REGRESSION:
+        for c in (y_col, *pred_cols):
+            if not numeric(df[c]):
+                die(f"{metric} needs numeric values, but column '{c}' is not numeric.")
+        return
+    if len(classes) < 2 and metric in NEEDS_SCORE:
+        die(f"{metric} needs both classes in '{y_col}', but it has only {list(classes)}.")
+    if metric in NEEDS_SCORE:
+        if len(classes) > 2 and not has_pos_label:
+            die(f"{metric} on a {len(classes)}-class label needs --pos-label (one-vs-rest on that class).")
+        for c in pred_cols:
+            if not numeric(df[c]) and not pd.api.types.is_bool_dtype(df[c]):
+                die(f"{metric} needs scores or probabilities, but column '{c}' is not numeric.")
+        return
+    for c in pred_cols:  # accuracy / f1 / precision / recall want class labels, not probabilities
+        outside = float((~df[c].isin(classes)).mean())
+        if outside > 0.5:
+            die(f"{metric} needs hard class predictions, but column '{c}' looks like scores or probabilities "
+                f"({100 * outside:.0f}% of its values are not one of the labels {sorted(map(str, classes))[:6]}). "
+                f"Threshold it first, or use roc_auc / pr_auc.")
+
+
 def run(argv=None) -> dict:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data", required=True)
@@ -151,10 +179,14 @@ def run(argv=None) -> dict:
             p.error(f"column '{c}' not in {args.data}. Columns: {list(df.columns)[:15]}")
     cols = [args.y_true, *args.pred] + ([args.group] if args.group else [])
     before = len(df)
+    for c in cols:  # +/-inf is not a usable value: treat it like a missing one and say so
+        if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c]):
+            df[c] = df[c].replace([np.inf, -np.inf], np.nan)
     df = df.dropna(subset=cols).reset_index(drop=True)
     if len(df) == 0:
-        die("no rows left after dropping missing values.")
+        die("no rows left after dropping missing or non-finite values.")
     dropped = before - len(df)
+    validate_inputs(args.metric, df, args.y_true, args.pred, args.pos_label is not None)
 
     y = df[args.y_true].to_numpy()
     pos = args.pos_label
@@ -171,10 +203,12 @@ def run(argv=None) -> dict:
         bp, base_value = baseline_predictions(args.metric, y, args.baseline_value)
         preds = {"baseline": bp, **preds}
     groups = df[args.group].to_numpy() if args.group else None
-    point, draws = bootstrap(y, preds, metric_fn, args.n_boot, args.seed, groups)
+    with warnings.catch_warnings():  # a resample with one class is expected and is skipped, not worth a warning
+        warnings.simplefilter("ignore")
+        point, draws = bootstrap(y, preds, metric_fn, args.n_boot, args.seed, groups)
 
     higher = HIGHER_BETTER[args.metric]
-    print(f"n={len(df)}{' (dropped %d rows with missing values)' % dropped if dropped else ''}, "
+    print(f"n={len(df)}{' (dropped %d rows with missing or non-finite values)' % dropped if dropped else ''}, "
           f"metric={args.metric} ({'higher' if higher else 'lower'} is better), "
           f"{args.n_boot} bootstrap resamples{' of groups in ' + args.group if args.group else ''}")
     if len(df) < 30:
@@ -211,5 +245,15 @@ def run(argv=None) -> dict:
     return result
 
 
+def _safe_console():
+    """Column names and file paths can be non-ASCII; never crash on a legacy console encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 if __name__ == "__main__":
+    _safe_console()
     run()

@@ -430,7 +430,17 @@ def run(argv=None) -> tuple[int, list[dict]]:
     return (1 if leaks else 0), findings
 
 
+def _safe_console():
+    """Column names can be non-ASCII; never crash on a legacy console encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main():
+    _safe_console()
     code, _ = run()
     sys.exit(code)
 

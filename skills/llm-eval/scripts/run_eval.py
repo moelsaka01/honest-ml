@@ -319,7 +319,17 @@ def run(argv=None) -> dict:
     return out
 
 
+def _safe_console():
+    """Case ids and outputs can be non-ASCII; never crash on a legacy console encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main():
+    _safe_console()
     out = run()
     sys.exit(1 if out["cannot_fail"] else 0)
 
