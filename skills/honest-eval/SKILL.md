@@ -47,7 +47,7 @@ python <skill-dir>/scripts/bootstrap_ci.py --data preds.csv --y-true y --pred mo
 python <skill-dir>/scripts/bootstrap_ci.py --data preds.csv --y-true y --pred p --metric accuracy --group user_id
 ```
 
-Metrics: `accuracy f1 precision recall roc_auc pr_auc mae rmse r2`. `roc_auc` and `pr_auc` need scores or probabilities; the others need hard predictions. For binary `f1/precision/recall`, the positive class defaults to the rarest class (override with `--pos-label`); with more than two classes they are macro-averaged. Pass `--baseline-value` with the TRAIN majority class or TRAIN mean so the baseline does not peek at test labels. The script prints a baseline row, 95% intervals, the paired difference, and warns when the best model's interval overlaps the baseline.
+Metrics: `accuracy f1 precision recall roc_auc pr_auc mae rmse r2`. `roc_auc` and `pr_auc` need scores or probabilities; the others need hard predictions. For binary `f1/precision/recall`, the positive class defaults to the rarest class (override with `--pos-label`); with more than two classes they are macro-averaged. Pass `--baseline-value` with the TRAIN majority class or TRAIN mean so the baseline does not peek at test labels. The script prints a baseline row, 95% intervals, the paired difference, and warns when the best model's interval overlaps the baseline. Rows with missing or infinite values are dropped and counted. It stops with a clear error, instead of printing `nan`, when the inputs do not fit the metric: probabilities given to `accuracy`/`f1`, one class given to `roc_auc`, a multiclass label with `roc_auc` and no `--pos-label`, or non-numeric values for a regression metric.
 
 ## Output contract
 

@@ -66,6 +66,14 @@ def file_sha256(path: str | Path, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
+def mask_home(text: str) -> str:
+    """Replace your home folder (and so your username) with ~ so run folders are safe to commit."""
+    home = str(Path.home())
+    for variant in {home, home.replace("\\", "/"), home.replace("\\", "\\\\")}:
+        text = re.sub(re.escape(variant), "~", text, flags=re.IGNORECASE)
+    return text
+
+
 def data_fingerprint(path: str | Path) -> dict:
     p = Path(path)
     if not p.exists():
@@ -76,8 +84,8 @@ def data_fingerprint(path: str | Path) -> dict:
         for f in files:
             h.update(str(f.relative_to(p)).replace("\\", "/").encode())
             h.update(file_sha256(f).encode())
-        return {"path": str(path), "sha256": h.hexdigest(), "files": len(files)}
-    info = {"path": str(path), "sha256": file_sha256(p), "bytes": p.stat().st_size}
+        return {"path": mask_home(str(path)), "sha256": h.hexdigest(), "files": len(files)}
+    info = {"path": mask_home(str(path)), "sha256": file_sha256(p), "bytes": p.stat().st_size}
     if p.suffix.lower() in (".csv", ".tsv", ".txt", ".jsonl"):
         with open(p, "rb") as f:
             lines = sum(1 for _ in f)
@@ -98,7 +106,14 @@ def git_info(repo: str | None = None) -> dict:
     if sha is None:
         return {"sha": None, "dirty": None, "note": "not a git repository (or git not installed)"}
     status = _run(["git", "status", "--porcelain"], repo)
-    return {"sha": sha, "dirty": bool(status), "branch": _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo)}
+    info = {"sha": sha, "dirty": bool(status), "branch": _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo)}
+    if status:  # a dirty tree is not reproducible from the SHA alone: say what differs, and fingerprint it
+        info["changed_files"] = [re.sub(r"^\S+\s+", "", line) for line in status.splitlines()][:50]
+        diff = _run(["git", "diff", "HEAD"], repo)
+        info["diff_sha256"] = hashlib.sha256(diff.encode("utf-8")).hexdigest() if diff else None
+        info["note"] = ("uncommitted changes: commit them, or keep this diff to reproduce the run "
+                        "(diff_sha256 identifies it; untracked files are in changed_files but not in the diff)")
+    return info
 
 
 def env_info() -> str:
@@ -113,7 +128,7 @@ def env_info() -> str:
         pass
     frozen = _run([sys.executable, "-m", "pip", "freeze"], timeout=120)
     lines.append("\n# pip freeze\n" + (frozen if frozen is not None else "(pip freeze failed)"))
-    return "\n".join(lines) + "\n"
+    return mask_home("\n".join(lines) + "\n")
 
 
 # --------------------------------------------------------------------- run dir
@@ -195,5 +210,15 @@ def main(argv=None) -> int:
     return 0
 
 
+def _safe_console():
+    """Names and paths can be non-ASCII; never crash on a legacy console encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 if __name__ == "__main__":
+    _safe_console()
     sys.exit(main())

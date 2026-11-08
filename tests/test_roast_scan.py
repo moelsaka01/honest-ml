@@ -234,6 +234,47 @@ BAD = {
             X_train, X_test = train_test_split(df, random_state=0)
         """,
     },
+    "R16": {
+        "group_target_mean_transform_before_split": """
+            df["user_mean"] = df.groupby("user")["y"].transform("mean")
+            X_train, X_test = train_test_split(df, random_state=0)
+        """,
+        "target_encoding_via_map_before_split": """
+            enc = df.groupby("city")["churned"].mean()
+            df["city_enc"] = df["city"].map(enc)
+            X_train, X_test = train_test_split(df, random_state=0)
+        """,
+        "agg_dict_with_target_column": """
+            stats = df.groupby("store").agg({"target": "mean"})
+            df["store_rate"] = df["store"].map(stats["target"])
+            X_train, X_test = train_test_split(df, random_state=0)
+        """,
+        "target_column_named_by_the_label_assignment": """
+            y = df["clicks"]
+            df["ad_clicks"] = df.groupby("ad")["clicks"].transform("mean")
+            X_train, X_test = train_test_split(df, random_state=0)
+        """,
+    },
+    "R17": {
+        "drop_duplicates_on_train_only_after_split": """
+            X_train, X_test = train_test_split(df, random_state=0)
+            X_train = X_train.drop_duplicates()
+        """,
+    },
+    "R18": {
+        "print_best_score_as_test": """
+            g = GridSearchCV(RandomForestClassifier(random_state=0), {"max_depth": [2, 4]}, cv=5).fit(X, y)
+            print("test accuracy", g.best_score_)
+        """,
+        "best_score_stored_as_test_score": """
+            search = GridSearchCV(RandomForestClassifier(random_state=0), {"max_depth": [2, 4]}, cv=5).fit(X, y)
+            test_score = search.best_score_
+        """,
+        "fstring_report": """
+            g = GridSearchCV(RandomForestClassifier(random_state=0), {"max_depth": [2, 4]}, cv=5).fit(X, y)
+            print(f"Test AUC: {g.best_score_:.3f}")
+        """,
+    },
 }
 
 
@@ -323,6 +364,36 @@ GOOD = {
     "rolling_then_shifted_later": """
         df["r"] = df["v"].rolling(3).mean()
         df["r"] = df["r"].shift(1)
+    """,
+    "eda_group_target_mean_is_not_a_feature": """
+        print(df.groupby("region")["churned"].mean())
+        rate = df.groupby("region")["churned"].mean()
+        rate.plot()
+        X_train, X_test = train_test_split(df, random_state=0)
+    """,
+    "target_encoding_from_train_only": """
+        X_train, X_test = train_test_split(df, random_state=0)
+        enc = X_train.groupby("city")["churned"].mean()
+        X_train["city_enc"] = X_train["city"].map(enc)
+        X_test["city_enc"] = X_test["city"].map(enc)
+    """,
+    "group_mean_of_a_feature_not_the_target": """
+        df["user_avg_spend"] = df.groupby("user")["spend"].transform("mean")
+        X_train, X_test = train_test_split(df, random_state=0)
+    """,
+    "dedupe_before_the_split": """
+        df = df.drop_duplicates()
+        X_train, X_test = train_test_split(df, random_state=0)
+    """,
+    "best_score_reported_as_cv_and_test_scored_properly": """
+        base = DummyClassifier().fit(X_train, y_train)
+        g = GridSearchCV(RandomForestClassifier(random_state=0), {"max_depth": [2, 4]}, cv=5).fit(X_train, y_train)
+        print("cross-validation score", g.best_score_)
+        print("test accuracy", g.score(X_test, y_test))
+    """,
+    "test_word_without_best_score": """
+        base = DummyClassifier().fit(X_train, y_train)
+        print("test accuracy", accuracy_score(y_test, g.predict(X_test)))
     """,
     "preprocess_function_without_split": """
         def preprocess(frame, scaler):

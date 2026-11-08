@@ -356,5 +356,15 @@ def run(argv=None) -> dict:
     return report
 
 
+def _safe_console():
+    """Column names and file paths can be non-ASCII; never crash on a legacy console encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 if __name__ == "__main__":
+    _safe_console()
     run()
