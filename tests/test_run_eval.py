@@ -1,6 +1,8 @@
 import contextlib
 import io
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -142,12 +144,112 @@ class RunTests(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
 
 
+class NegativeControlTests(unittest.TestCase):
+    """An eval that cannot fail cannot meaningfully pass: prove the checks can fail."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        self.cases = [
+            {"id": "strong", "input": "q", "expected": "Paris"},
+            {"id": "vacuous", "input": "q", "checks": [{"type": "not_contains", "value": "Traceback"}]},
+            {"id": "size", "input": "q", "checks": [{"type": "max_chars", "n": 50}]},
+        ]
+        write_jsonl(self.d / "cases.jsonl", self.cases)
+        write_jsonl(self.d / "good.jsonl", [{"id": "strong", "output": "Paris"},
+                                            {"id": "vacuous", "output": "fine"},
+                                            {"id": "size", "output": "short"}])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def args(self, *extra):
+        return ["--cases", str(self.d / "cases.jsonl"), "--outputs", str(self.d / "good.jsonl"), *extra]
+
+    def test_known_bad_that_fails_everywhere_is_ok(self):
+        write_jsonl(self.d / "bad.jsonl", [{"id": "strong", "output": "Lyon"},
+                                           {"id": "vacuous", "output": "Traceback (most recent call last)"},
+                                           {"id": "size", "output": "x" * 80}])
+        out, text = run_quiet(self.args("--known-bad", str(self.d / "bad.jsonl")))
+        self.assertEqual(out["cannot_fail"], [])
+        self.assertIn("OK: all 3 covered cases failed", text)
+
+    def test_a_check_that_passes_a_wrong_output_is_reported(self):
+        write_jsonl(self.d / "bad.jsonl", [{"id": "strong", "output": "Lyon"},
+                                           {"id": "vacuous", "output": "completely wrong answer"},   # still passes
+                                           {"id": "size", "output": "x" * 80}])
+        out, text = run_quiet(self.args("--known-bad", str(self.d / "bad.jsonl")))
+        self.assertEqual(out["cannot_fail"], ["vacuous"])
+        self.assertIn("cannot fail", text)
+
+    def test_cases_without_a_known_bad_output_are_listed_as_uncontrolled(self):
+        write_jsonl(self.d / "bad.jsonl", [{"id": "strong", "output": "Lyon"}])
+        out, text = run_quiet(self.args("--known-bad", str(self.d / "bad.jsonl")))
+        self.assertIn("not controlled", text)
+        self.assertIn("vacuous", text)
+        self.assertEqual(out["cannot_fail"], [])
+
+    def test_a_known_bad_file_covering_nothing_says_so(self):
+        write_jsonl(self.d / "bad.jsonl", [{"id": "ghost", "output": "x"}])
+        out, text = run_quiet(self.args("--known-bad", str(self.d / "bad.jsonl")))
+        self.assertIn("covers none of the graded cases", text)
+        self.assertIn("unknown case ids", text)
+        self.assertNotIn("OK:", text)
+
+    def test_junk_check_warns_about_cases_that_accept_junk(self):
+        out, text = run_quiet(self.args("--junk-check"))
+        self.assertEqual(out["junk_passes"], ["size", "vacuous"])      # empty / short junk passes these two
+        self.assertIn("WARNING", text.split("Junk check")[1])
+        self.assertEqual(out["cannot_fail"], [])                       # junk only warns, it never fails the run
+
+    def test_junk_check_is_clean_when_every_check_demands_something(self):
+        write_jsonl(self.d / "c2.jsonl", [{"id": "a", "input": "q", "expected": "Paris"},
+                                          {"id": "b", "input": "q", "checks": [{"type": "numeric", "value": 7}]}])
+        write_jsonl(self.d / "o2.jsonl", [{"id": "a", "output": "Paris"}, {"id": "b", "output": "7"}])
+        out, text = run_quiet(["--cases", str(self.d / "c2.jsonl"), "--outputs", str(self.d / "o2.jsonl"),
+                               "--junk-check"])
+        self.assertEqual(out["junk_passes"], [])
+        self.assertIn("no junk output passes", text)
+
+    def test_field_checks_fail_on_junk(self):
+        write_jsonl(self.d / "c3.jsonl", [{"id": "j", "input": "q", "checks": [{"type": "field_true", "field": "judge_pass"}]}])
+        write_jsonl(self.d / "o3.jsonl", [{"id": "j", "output": "x", "judge_pass": True}])
+        out, _ = run_quiet(["--cases", str(self.d / "c3.jsonl"), "--outputs", str(self.d / "o3.jsonl"), "--junk-check"])
+        self.assertEqual(out["junk_passes"], [])
+
+    def test_default_run_prints_no_negative_control_section(self):
+        _, text = run_quiet(self.args())
+        self.assertNotIn("Negative control", text)
+        self.assertNotIn("Junk check", text)
+
+    def test_exit_code_is_1_only_when_a_known_bad_output_passes(self):
+        script = _paths.ROOT / "skills" / "llm-eval" / "scripts" / "run_eval.py"
+        write_jsonl(self.d / "bad_ok.jsonl", [{"id": "strong", "output": "Lyon"}])
+        write_jsonl(self.d / "bad_weak.jsonl", [{"id": "vacuous", "output": "anything"}])
+        base = [sys.executable, str(script), *self.args()]
+        for bad, code in (("bad_ok.jsonl", 0), ("bad_weak.jsonl", 1)):
+            r = subprocess.run(base + ["--known-bad", str(self.d / bad)], capture_output=True, text=True)
+            self.assertEqual(r.returncode, code, r.stdout + r.stderr)
+
+
 class TemplateTests(unittest.TestCase):
     def test_shipped_templates_pass_end_to_end(self):
         out, text = run_quiet(["--cases", str(TEMPLATES / "cases.example.jsonl"),
                                "--outputs", str(TEMPLATES / "outputs.example.jsonl")])
         self.assertEqual(out["new"], 1.0)
         self.assertIn("fewer than 30", text)
+
+    def test_shipped_known_bad_template_fails_every_case(self):
+        out, text = run_quiet(["--cases", str(TEMPLATES / "cases.example.jsonl"),
+                               "--outputs", str(TEMPLATES / "outputs.example.jsonl"),
+                               "--known-bad", str(TEMPLATES / "known_bad.example.jsonl")])
+        self.assertEqual(out["cannot_fail"], [], text)
+        self.assertIn("OK: all 6 covered cases failed", text)
+
+    def test_junk_check_exposes_the_weak_template_case(self):
+        out, _ = run_quiet(["--cases", str(TEMPLATES / "cases.example.jsonl"),
+                            "--outputs", str(TEMPLATES / "outputs.example.jsonl"), "--junk-check"])
+        self.assertEqual(out["junk_passes"], ["regress-empty-input"])   # only forbids 'Traceback'; junk satisfies it
 
 
 if __name__ == "__main__":

@@ -57,7 +57,7 @@ These are the same mistakes that sink Kaggle notebooks, papers, and production m
 | 📏 **[honest-eval](skills/honest-eval/SKILL.md)** | Baseline first, the right metric, confidence intervals, paired comparisons, test set touched once. | `bootstrap_ci.py` |
 | 🧪 **[dataset-audit](skills/dataset-audit/SKILL.md)** | Profiles new data for label noise, missingness, duplicates, unit errors, and train/serve skew before modeling. | `audit.py` |
 | 🔁 **[reproducible-runs](skills/reproducible-runs/SKILL.md)** | Seeds, pinned envs, config, data hashes, git SHA, one directory per run, multi-seed results. | `repro.py` |
-| 🤖 **[llm-eval](skills/llm-eval/SKILL.md)** | Real eval sets for prompts, RAG, and agents: programmatic graders, checked LLM-as-judge, flip reports, cost and latency. | `run_eval.py` + templates |
+| 🤖 **[llm-eval](skills/llm-eval/SKILL.md)** | Real eval sets for prompts, RAG, and agents: programmatic graders, checked LLM-as-judge, flip reports, cost and latency, and negative controls that prove an eval can fail. | `run_eval.py` + templates |
 | 🔥 **[ml-roast](skills/ml-roast/SKILL.md)** | A blunt, prioritized review of ML code with fixes and a 0-10 trust score. | `roast_scan.py` |
 
 Skills trigger on their own when the agent is doing ML work. You can also call them by name: *"roast my notebook"*, *"run leakage-hunter on this"*.

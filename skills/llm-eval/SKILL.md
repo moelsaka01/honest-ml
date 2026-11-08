@@ -37,7 +37,20 @@ python <skill-dir>/scripts/run_eval.py --cases evals/cases.jsonl --outputs out_n
 python <skill-dir>/scripts/run_eval.py --cases evals/cases.jsonl --outputs out_new.jsonl --baseline out_old.jsonl
 ```
 
-It reports pass rate with a 95% bootstrap interval, average cost, p50 latency, failing cases with the reason, a per-tag breakdown, and with `--baseline` the paired difference, **cases that flipped to fail / to pass**, and a verdict. It warns about ungraded cases, missing outputs and unknown ids, and exits `2` on malformed input.
+It reports pass rate with a 95% bootstrap interval, average cost, p50 latency, failing cases with the reason, a per-tag breakdown, and with `--baseline` the paired difference, **cases that flipped to fail / to pass**, and a verdict. It warns about ungraded cases, missing outputs and unknown ids, and exits `2` on malformed input (`1` when a known-bad output passes, see below).
+
+### Prove the eval can fail first
+
+An eval that cannot fail cannot meaningfully pass. Before trusting a pass rate, feed the eval outputs you **know are wrong** and confirm each one fails:
+
+```bash
+python <skill-dir>/scripts/run_eval.py --cases evals/cases.jsonl --outputs out_new.jsonl \
+  --known-bad evals/known_bad.jsonl --junk-check
+```
+
+- `--known-bad` takes one deliberately wrong output per case (same format as outputs, see `<skill-dir>/templates/known_bad.example.jsonl`: a wrong fact, prose instead of JSON, a compliant answer where a refusal is required, the exact bug a regression case guards against). A case that **passes** its wrong output has a check that cannot fail: the script prints `FAIL` and exits `1`. Strengthen that check (a required fact, number or regex) before reporting the pass rate.
+- `--junk-check` needs no extra file. It grades empty, `N/A`, `I don't know.`, `{}`, `null` and filler text, and warns about cases that accept any of them. Typical culprits are cases made only of `not_contains`, `max_chars`, or a loose regex. Some cases rightly accept a refusal or an empty answer, so this warns and never fails the run.
+- Cases with no known-bad output are listed as *not controlled*. Cover the cases that matter most first (regressions, safety, format).
 
 ## 5. Compare changes properly
 
@@ -53,6 +66,7 @@ It reports pass rate with a 95% bootstrap interval, average cost, p50 latency, f
 Eval: <name>, <n> graded cases, <runs> run(s) each
 | Version | Pass rate | 95% CI | Avg cost | p50 latency |
 Flipped to fail: <ids>    Flipped to pass: <ids>
+Negative control: <known-bad: n of m cases failed as they must | junk check: ids that accept junk | not run>
 Verdict: <ship | don't ship | needs more cases>, because <reason>
 ```
 

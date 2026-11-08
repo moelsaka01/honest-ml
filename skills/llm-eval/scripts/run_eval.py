@@ -19,7 +19,14 @@ Usage:
   python run_eval.py --cases evals/cases.jsonl --outputs out_new.jsonl
   python run_eval.py --cases evals/cases.jsonl --outputs out_new.jsonl --baseline out_old.jsonl
 
-Exit codes: 0 ok, 2 bad input. A case with several runs counts as the fraction of runs that pass.
+Negative controls (an eval that cannot fail cannot meaningfully pass):
+  --known-bad bad.jsonl   outputs you know are WRONG, same format as --outputs. Every case they cover must
+                          FAIL; a case that passes a deliberately wrong output has a check that cannot fail.
+  --junk-check            also grade built-in junk (empty, "N/A", "I don't know.", {}, null, lorem ipsum).
+                          Cases that pass junk are listed as a WARNING (some cases may rightly accept it).
+
+Exit codes: 0 ok, 1 a known-bad output passed, 2 bad input.
+A case with several runs counts as the fraction of runs that pass.
 Requires: numpy
 """
 from __future__ import annotations
@@ -155,6 +162,23 @@ def score(cases: list[dict], outputs: list[dict]) -> dict:
             "runs_per_case": {cid: len(by_id.get(cid, [])) for cid in rates}}
 
 
+JUNK_OUTPUTS = ["", "N/A", "I don't know.", "{}", "null", "lorem ipsum dolor sit amet"]
+
+
+def negative_control(cases: list[dict], graded_ids: list[str], bad_rows: list[dict]) -> dict:
+    """Grade outputs that are known to be wrong. Any graded case they pass has a check that cannot fail."""
+    s = score(cases, bad_rows)
+    covered = sorted(i for i in s["rates"] if i not in s["missing"] and i in set(graded_ids))
+    return {"covered": covered,
+            "cannot_fail": sorted(i for i in covered if s["rates"][i] > 0),
+            "uncovered": sorted(set(graded_ids) - set(covered)),
+            "unknown": s["unknown_outputs"]}
+
+
+def junk_rows(graded_ids: list[str]) -> list[dict]:
+    return [{"id": cid, "output": junk, "run": k} for cid in graded_ids for k, junk in enumerate(JUNK_OUTPUTS)]
+
+
 def boot_ci(values: np.ndarray, n_boot=2000, seed=0) -> tuple[float, float]:
     if len(values) < 2:
         return float("nan"), float("nan")
@@ -190,6 +214,9 @@ def run(argv=None) -> dict:
     p.add_argument("--baseline", help="outputs of the previous version, graded on the same cases")
     p.add_argument("--name", default="candidate")
     p.add_argument("--baseline-name", default="baseline")
+    p.add_argument("--known-bad", help="outputs known to be WRONG (same format as --outputs); each covered case must fail")
+    p.add_argument("--junk-check", action="store_true",
+                   help="also grade built-in junk outputs and warn about cases that pass them")
     args = p.parse_args(argv)
 
     cases = read_jsonl(args.cases)
@@ -258,8 +285,44 @@ def run(argv=None) -> dict:
         print("\nBy tag:")
         for t, v in sorted(tags.items()):
             print(f"  {t:<20} {np.mean(v):.3f}  (n={len(v)})")
+
+    graded = sorted(new["rates"])
+    out["cannot_fail"], out["junk_passes"] = [], []
+    if args.known_bad:
+        nc = negative_control(cases, graded, read_jsonl(args.known_bad))
+        out["cannot_fail"] = nc["cannot_fail"]
+        print("\nNegative control (known-bad outputs, every one must fail):")
+        if nc["unknown"]:
+            print(f"  WARNING: known-bad outputs for unknown case ids ignored: {', '.join(nc['unknown'][:10])}")
+        if not nc["covered"]:
+            print("  WARNING: the known-bad file covers none of the graded cases, so nothing was controlled.")
+        elif nc["cannot_fail"]:
+            print(f"  FAIL: {len(nc['cannot_fail'])} of {len(nc['covered'])} covered cases PASSED a deliberately "
+                  f"wrong output, so their checks cannot fail: {', '.join(nc['cannot_fail'][:10])}")
+            print("  Strengthen those checks (add a required fact, a number, a regex) before trusting their pass rate.")
+        else:
+            print(f"  OK: all {len(nc['covered'])} covered cases failed on their wrong output.")
+        if nc["covered"] and nc["uncovered"]:
+            print(f"  {len(nc['uncovered'])} graded cases have no known-bad output (not controlled): "
+                  f"{', '.join(nc['uncovered'][:10])}")
+    if args.junk_check:
+        s = score(cases, junk_rows(graded))
+        out["junk_passes"] = sorted(i for i in graded if s["rates"].get(i, 0) > 0)
+        print("\nJunk check (empty, 'N/A', \"I don't know.\", {}, null, lorem ipsum):")
+        if out["junk_passes"]:
+            print(f"  WARNING: {len(out['junk_passes'])} of {len(graded)} cases pass at least one junk output: "
+                  f"{', '.join(out['junk_passes'][:10])}")
+            print("  Intended for cases that should accept a refusal or an empty answer; otherwise the check is "
+                  "too weak.")
+        else:
+            print(f"  OK: no junk output passes any of the {len(graded)} graded cases.")
     return out
 
 
+def main():
+    out = run()
+    sys.exit(1 if out["cannot_fail"] else 0)
+
+
 if __name__ == "__main__":
-    run()
+    main()
