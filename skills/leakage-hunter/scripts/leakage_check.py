@@ -7,16 +7,25 @@ Checks (tabular data, CSV or Parquet):
   3. Identifier-like columns used as features
   4. Time order: train rows dated after the earliest test row   (--time)
   5. Group overlap: the same user/customer/patient in both sets (--group)
+  6. Point in time: feature values recorded AFTER the moment of prediction (--decision-time)
 
 Usage:
   python leakage_check.py --train train.csv --test test.csv --target y
   python leakage_check.py --data all.csv --target y --test-size 0.2
   Optional: --time <col> --group <col> --top 10 --json
 
+Point-in-time check (opt-in). A chronological split does not catch a feature that was backfilled
+after the decision. That needs a timestamp for when each value was written. Give the column that
+holds the moment of prediction and name each feature's timestamp column:
+  --decision-time scored_at --asof balance:balance_updated_at --asof risk:risk_loaded_at
+Columns named <feature>_asof / _as_of / _updated_at / _recorded_at / _loaded_at / _ingested_at /
+_observed_at / _snapshot_at are paired with <feature> automatically. Without such timestamps the
+script cannot tell a backfilled value from an honest one, and it says so.
+
 Exit codes: 0 = no hard leak found, 1 = suspected leakage, 2 = bad usage / unreadable input.
 
 NOT covered (needs a code review, see SKILL.md): preprocessing fitted before the split,
-tuning on the test set, and whether a feature exists at prediction time.
+tuning on the test set, and feature availability when no as-of timestamps are provided.
 
 Requires: pandas, scikit-learn, numpy
 """
@@ -256,6 +265,82 @@ def check_group(train, test, col):
                    f"({rows} test rows, {pct:.1f}%)", groups=len(shared), test_rows=rows)
 
 
+ASOF_SUFFIX = re.compile(
+    r"(_asof|_as_of|_updated_at|_recorded_at|_loaded_at|_ingested_at|_observed_at|_snapshot_at)$",
+    re.IGNORECASE)
+
+
+def find_asof_pairs(columns, explicit, decision):
+    """{feature: timestamp column}. Explicit --asof pairs win; the rest are matched by name suffix."""
+    pairs = {}
+    for spec in explicit:
+        if ":" not in spec or not all(part.strip() for part in spec.split(":", 1)):
+            die(f"--asof expects FEATURE:TIMESTAMP_COLUMN, got '{spec}'")
+        feature, stamp = (part.strip() for part in spec.split(":", 1))
+        pairs[feature] = stamp
+    present = set(columns)
+    for col in columns:
+        match = ASOF_SUFFIX.search(col)
+        if match and col != decision:
+            feature = col[:match.start()]
+            if feature in present and feature not in pairs:
+                pairs[feature] = col
+    return pairs
+
+
+def check_asof(train, test, decision, pairs):
+    """Flag features whose value was written after the moment the prediction would have been made."""
+    for name, df in (("train", train), ("test", test)):
+        if decision not in df.columns:
+            return finding("point_in_time", "skip", f"Decision-time column '{decision}' missing from {name}.")
+    if not pairs:
+        return finding(
+            "point_in_time", "info",
+            f"Decision time '{decision}' given, but no per-feature as-of timestamps found, so a value backfilled "
+            "after the decision cannot be told from an honest one. Add FEATURE_asof columns or pass "
+            "--asof FEATURE:TIMESTAMP_COLUMN, or ask the data owner for load / snapshot history.")
+    rows, unusable = {}, []
+    for feature, stamp in pairs.items():
+        for name, df in (("train", train), ("test", test)):
+            if feature not in df.columns or stamp not in df.columns:
+                unusable.append(f"{feature} ({'feature' if feature not in df.columns else stamp} missing from {name})")
+                break
+            try:
+                recorded, decided = _to_time(df[stamp]), _to_time(df[decision])
+                valid = recorded.notna() & decided.notna() & df[feature].notna()
+                late = int((valid & (recorded > decided)).sum())
+            except TypeError:
+                unusable.append(f"{feature} ({stamp} and {decision} are different kinds of time)")
+                break
+            n = int(valid.sum())
+            rows.setdefault(feature, {})[name] = {"late": late, "checked": n,
+                                                  "percent": round(100 * late / n, 2) if n else 0.0}
+    worst = {f: max(s["percent"] for s in sp.values()) for f, sp in rows.items()}
+    leaks = [f for f, w in worst.items() if w > 100 * TIME_LEAK_PCT]
+    warns = [f for f, w in worst.items() if 0 < w <= 100 * TIME_LEAK_PCT]
+    level = "leak" if leaks else "warn" if warns else "ok"
+    if not rows:
+        return finding("point_in_time", "skip", "No usable as-of pairs: " + "; ".join(unusable))
+
+    def describe(features):
+        return ", ".join(
+            f"{f} ({sum(s['late'] for s in rows[f].values())} rows, up to {worst[f]:.1f}% of a split)"
+            for f in features)
+
+    if leaks:
+        msg = ("Features whose value was recorded AFTER the decision time (not known when predicting): "
+               + describe(leaks) + ". Rebuild them as of the decision time, or drop them.")
+    elif warns:
+        msg = "A few rows have a feature value recorded after the decision time: " + describe(warns)
+    else:
+        msg = (f"No checked feature was recorded after decision time '{decision}' "
+               f"({len(rows)} feature(s) with as-of timestamps).")
+    if unusable:
+        msg += " Not checked: " + "; ".join(unusable) + "."
+    return finding("point_in_time", level, msg, decision_time=decision, features=rows,
+                   flagged=leaks, warned=warns, pairs={f: pairs[f] for f in rows})
+
+
 # ------------------------------------------------------------------------ main
 TAGS = {"ok": "[ok]   ", "warn": "[WARN] ", "leak": "[LEAK] ", "skip": "[skip] ", "info": "[info] "}
 
@@ -266,6 +351,11 @@ def run(argv=None) -> tuple[int, list[dict]]:
     p.add_argument("--test-size", type=float, default=0.2)
     p.add_argument("--target", required=True)
     p.add_argument("--time"); p.add_argument("--group")
+    p.add_argument("--decision-time", help="column holding the moment each prediction would be made "
+                   "(enables the point-in-time check)")
+    p.add_argument("--asof", action="append", default=[], metavar="FEATURE:TIMESTAMP_COLUMN",
+                   help="when this feature's value was recorded; repeatable. Needs --decision-time "
+                   "(or --time, which is then used as the decision time)")
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--json", action="store_true", help="print findings as JSON")
     args = p.parse_args(argv)
@@ -276,6 +366,9 @@ def run(argv=None) -> tuple[int, list[dict]]:
         p.error("use either --data or --train/--test, not both.")
     if not 0 < args.test_size < 1:
         p.error("--test-size must be between 0 and 1.")
+    decision = args.decision_time or (args.time if args.asof else None)
+    if args.asof and not decision:
+        p.error("--asof needs --decision-time (the column with the moment of prediction).")
 
     train, test = load(args)
     for name, df in (("train", train), ("test", test)):
@@ -303,6 +396,9 @@ def run(argv=None) -> tuple[int, list[dict]]:
         findings.append(check_time(train, test, args.time))
     if args.group:
         findings.append(check_group(train, test, args.group))
+    if decision:
+        pairs = find_asof_pairs(list(train.columns), args.asof, decision)
+        findings.append(check_asof(train, test, decision, pairs))
 
     leaks = [f for f in findings if f["level"] == "leak"]
     warns = [f for f in findings if f["level"] == "warn"]
@@ -326,8 +422,11 @@ def run(argv=None) -> tuple[int, list[dict]]:
                     mark = "<-- suspect" if c in f["details"]["flagged"] else ""
                     print(f"          {c:<36} {s:.3f} {mark}".rstrip())
         print(f"\nVerdict: {verdict}")
-        print("Not covered by this script: preprocessing fitted before the split, tuning on test, "
-              "feature availability at prediction time. Review the code for those.")
+        print("Not covered by this script: preprocessing fitted before the split, tuning on test"
+              + ("." if decision else ", and whether values were backfilled after the decision "
+                 "(needs as-of timestamps: see --decision-time and --asof)."))
+        print("Review the code for those, and confirm with the data owner that each feature exists at "
+              "prediction time.")
     return (1 if leaks else 0), findings
 
 

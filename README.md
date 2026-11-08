@@ -53,7 +53,7 @@ These are the same mistakes that sink Kaggle notebooks, papers, and production m
 
 | Skill | What it makes your agent do | Ships with |
 |---|---|---|
-| 🔍 **[leakage-hunter](skills/leakage-hunter/SKILL.md)** | Hunts train/test contamination, target, temporal, group, and preprocessing leakage before any metric is reported. | `leakage_check.py` |
+| 🔍 **[leakage-hunter](skills/leakage-hunter/SKILL.md)** | Hunts train/test contamination, target, temporal, group, and preprocessing leakage before any metric is reported. Opt-in point-in-time check for features backfilled after the decision (needs as-of timestamps). | `leakage_check.py` |
 | 📏 **[honest-eval](skills/honest-eval/SKILL.md)** | Baseline first, the right metric, confidence intervals, paired comparisons, test set touched once. | `bootstrap_ci.py` |
 | 🧪 **[dataset-audit](skills/dataset-audit/SKILL.md)** | Profiles new data for label noise, missingness, duplicates, unit errors, and train/serve skew before modeling. | `audit.py` |
 | 🔁 **[reproducible-runs](skills/reproducible-runs/SKILL.md)** | Seeds, pinned envs, config, data hashes, git SHA, one directory per run, multi-seed results. | `repro.py` |
