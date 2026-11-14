@@ -139,6 +139,12 @@ The tests run every script against planted-flaw fixtures, check that the scanner
 
 PRs welcome, especially new failure modes with a real-world example of how they burned someone. Each skill is a folder with a `SKILL.md` (short, specific, checkable) and optional `scripts/`. Add a test for any new check, including one that proves it does *not* fire on clean data.
 
+## Part of the honest-* series
+
+- **honest-ml** (this repo): stops agents from shipping leaky, unreproducible, or overclaimed ML results.
+- **[honest-tests](https://github.com/moelsaka01/honest-tests)**: stops agents from shipping tests that cannot fail.
+- **[honest-done](https://github.com/moelsaka01/honest-done)**: stops agents from calling unfinished work done.
+
 ## License
 
 MIT
